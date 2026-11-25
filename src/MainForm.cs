@@ -320,17 +320,25 @@ namespace ZeroXEdit
             query.SetBounds(Theme.D(16), Theme.D(9), Theme.D(195), Theme.D(28));
             query.Font = Theme.Mono(10);
             query.AccessibleName = "Search value";
-            findType.SetBounds(Theme.D(218), Theme.D(9), Theme.D(107), Theme.D(26));
+            findType.SetBounds(Theme.D(218), Theme.D(9), Theme.D(136), Theme.D(26));
             findType.DropDownStyle = ComboBoxStyle.DropDownList;
-            findType.Items.AddRange(new object[] { "Hex bytes", "Text (UTF-8)" });
+            findType.DisplayMember = "Key";
+            AddSearchFormat("Hex bytes");
+            AddSearchFormat("ASCII", "us-ascii");
+            AddSearchFormat("Windows-1252", "windows-1252");
+            AddSearchFormat("UTF-8", "utf-8");
+            AddSearchFormat("UTF-16 LE", "utf-16");
+            AddSearchFormat("UTF-16 BE", "utf-16BE");
+            AddSearchFormat("UTF-32 LE", "utf-32");
+            AddSearchFormat("UTF-32 BE", "utf-32BE");
             findType.SelectedIndex = 0;
             findType.AccessibleName = "Search format";
             findMessage.ForeColor = Theme.Muted;
             findMessage.Bounds = Theme.Box(16, 40, 600, 24);
             findBar.Controls.AddRange(new Control[] { query, findType, findMessage });
             var prev =
-                new Button { Text = "Previous", Bounds = Theme.Box(335, 7, 77, 29), AccessibleName = "Previous match" };
-            var next = new Button { Text = "Next", Bounds = Theme.Box(418, 7, 65, 29), AccessibleName = "Next match" };
+                new Button { Text = "Previous", Bounds = Theme.Box(364, 7, 77, 29), AccessibleName = "Previous match" };
+            var next = new Button { Text = "Next", Bounds = Theme.Box(447, 7, 65, 29), AccessibleName = "Next match" };
             prev.Click += delegate
             {
                 Find(true);
@@ -340,7 +348,7 @@ namespace ZeroXEdit
                 Find(false);
             };
             findBar.Controls.AddRange(new Control[] { prev, next });
-            var close = ButtonAt(findBar, "close", "", 491, 6, 32, "Close search (Esc)", HideFind);
+            var close = ButtonAt(findBar, "close", "", 520, 6, 32, "Close search (Esc)", HideFind);
             findBar.Resize += delegate
             {
                 close.Left = findBar.Width - close.Width - Theme.D(8);
@@ -362,6 +370,12 @@ namespace ZeroXEdit
                     e.SuppressKeyPress = true;
                 }
             };
+        }
+        private void AddSearchFormat(string label, string charset = null)
+        {
+            Encoding encoding = charset == null ? null : Encoding.GetEncoding(
+                charset, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+            findType.Items.Add(new KeyValuePair<string, Encoding>(label, encoding));
         }
         private void BuildStatus()
         {
@@ -627,7 +641,7 @@ namespace ZeroXEdit
         {
             StopSearch();
             findMessage.Text = findType.SelectedIndex == 0 ? "Enter a byte sequence, such as 89 50 4E 47."
-                                                           : "Enter case-sensitive UTF-8 text.";
+                                                          : "Enter case-sensitive " + findType.Text + " text.";
         }
         private void Find(bool backward)
         {
@@ -640,8 +654,8 @@ namespace ZeroXEdit
             findBar.Visible = true;
             try
             {
-                byte[] pattern =
-                    findType.SelectedIndex == 0 ? ByteTools.ParseHex(query.Text) : Encoding.UTF8.GetBytes(query.Text);
+                var encoding = ((KeyValuePair<string, Encoding>)findType.SelectedItem).Value;
+                byte[] pattern = encoding == null ? ByteTools.ParseHex(query.Text) : encoding.GetBytes(query.Text);
                 long start = Tab.Start + (Tab.Selected > 0 ? (backward ? -1 : 1) : 0);
                 search = new PatternSearch(Tab.Document, pattern, start, backward);
                 patternLength = pattern.Length;
@@ -649,6 +663,10 @@ namespace ZeroXEdit
                 SearchTick();
                 if (search != null)
                     searchTimer.Start();
+            }
+            catch (EncoderFallbackException)
+            {
+                findMessage.Text = "The search text contains a character that " + findType.Text + " cannot encode.";
             }
             catch (Exception ex)
             {

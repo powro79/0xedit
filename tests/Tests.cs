@@ -328,6 +328,56 @@ namespace ZeroXEdit
         {
             Invoke(form, "ProcessCmdKey", new Message(), keys);
         }
+        private static void EncodedTextSearches(MainForm form)
+        {
+            Key(form, Keys.Control | Keys.N);
+            Key(form, Keys.Control | Keys.F);
+            var tab = Field<List<EditorTab>>(form, "tabs").Last();
+            var grid = Field<HexView>(form, "grid");
+            var format = Field<ComboBox>(form, "findType");
+            var query = Field<TextBox>(form, "query");
+            var message = Field<Label>(form, "findMessage");
+
+            const string unicode = "é\U0001F600";
+            var cases = new[] {
+                new { Name = "ASCII", Text = "Ax", Bytes = "41 78" },
+                new { Name = "Windows-1252", Text = "€é", Bytes = "80 E9" },
+                new { Name = "UTF-8", Text = unicode, Bytes = "C3 A9 F0 9F 98 80" },
+                new { Name = "UTF-16 LE", Text = unicode, Bytes = "E9 00 3D D8 00 DE" },
+                new { Name = "UTF-16 BE", Text = unicode, Bytes = "00 E9 D8 3D DE 00" },
+                new { Name = "UTF-32 LE", Text = unicode, Bytes = "E9 00 00 00 00 F6 01 00" },
+                new { Name = "UTF-32 BE", Text = unicode, Bytes = "00 00 00 E9 00 01 F6 00" }
+            };
+            foreach (var sample in cases)
+            {
+                // Prefix and separate the two matches so they can start at unaligned offsets.
+                byte[] bytes = ByteTools.ParseHex(sample.Bytes);
+                grid.SelectRange(0, tab.Document.Length);
+                grid.Put(ByteTools.ParseHex("FF " + sample.Bytes + " FF " + sample.Bytes));
+                grid.Navigate(0, false);
+                format.SelectedIndex = format.FindStringExact(sample.Name);
+                Check(format.Text == sample.Name, sample.Name + " is selectable");
+                query.Text = sample.Text;
+                Key(form, Keys.F3);
+                Check(tab.Start == 1 && tab.Selected == bytes.Length, sample.Name + " forward match");
+                Key(form, Keys.Shift | Keys.F3);
+                Check(tab.Start == bytes.Length + 2 && tab.Selected == bytes.Length, sample.Name + " reverse wrap");
+                Key(form, Keys.F3);
+                Check(tab.Start == 1 && tab.Selected == bytes.Length, sample.Name + " forward wrap");
+            }
+
+            grid.SelectRange(0, tab.Document.Length);
+            grid.Put(new byte[] { 0x3F, 0x3F });
+            grid.Navigate(0, false);
+            foreach (string name in new[] { "ASCII", "Windows-1252" })
+            {
+                format.SelectedIndex = format.FindStringExact(name);
+                query.Text = name == "ASCII" ? "é" : "\U0001F600";
+                Key(form, Keys.F3);
+                Check(tab.Selected == 0 && message.Text.Contains(name + " cannot encode"),
+                      name + " reports unrepresentable characters");
+            }
+        }
         private static void Desktop(string[] args)
         {
             string path = Assembly.GetExecutingAssembly().Location;
@@ -436,6 +486,8 @@ namespace ZeroXEdit
                 form.Size = new Size(Theme.D(790), Theme.D(540));
                 Application.DoEvents();
                 Check(!Field<Inspector>(form, "inspector").Visible && grid.Width > 0, "Compact layout");
+                Case("All seven search encodings, byte order, wraparound, and unrepresentable text",
+                     () => EncodedTextSearches(form));
             }
         }
     }

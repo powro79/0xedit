@@ -27,7 +27,7 @@ Launching without arguments starts with an empty workspace. Open a file with **C
 - Press **Tab** to switch between hex and ASCII input. **Insert** toggles insert and overwrite modes. Typing at the end of a file appends bytes.
 - Drag or use **Shift** with the arrow keys to select bytes. Typing or pasting over a selection replaces the whole selection. **Edit → Select block** accepts a start offset and length in hexadecimal or decimal.
 - Copy from the hex pane to get space-separated hex text, or from the ASCII pane to get text. Copies also carry the original bytes for lossless pasting between 0xEdit windows. Clipboard copies support up to 16 MiB. **File → Save selection as** streams larger selections directly to a file.
-- **Search → Find** accepts hex bytes or case-sensitive UTF-8 text. Searches wrap at the end or beginning of the document and include unsaved edits.
+- **Search → Find** (**Ctrl+F**) accepts hex bytes or case-sensitive text. Choose **ASCII**, **Windows-1252**, **UTF-8**, **UTF-16 LE**, **UTF-16 BE**, **UTF-32 LE**, or **UTF-32 BE** from the search format list. Searches match the exact encoded bytes at any offset, wrap in either direction, and include unsaved edits.
 - The data inspector interprets bytes starting at the caret or the first selected byte. Switch the byte order to inspect integers and IEEE 754 floating-point values. The distribution chart groups the first 64 KiB into 32 buckets.
 - **View → Calculate SHA-256** hashes the current selection, or the whole document when the selection is empty. The result includes unsaved edits.
 
