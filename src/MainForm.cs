@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Windows.Forms;
@@ -22,7 +23,8 @@ namespace ZeroXEdit
         private readonly ToolTip tips = new ToolTip();
         private readonly Font wordmark = Theme.Ui(14, true), heading = Theme.Ui(12, true), statusFont = Theme.Ui(9),
                               monoStatus = Theme.Mono(9);
-        private readonly TextBox query = new TextBox();
+        private readonly TextBox query = new TextBox(), replacement = new TextBox();
+        private readonly CheckBox replaceMode = new CheckBox();
         private readonly ComboBox findType = new ComboBox(), columns = new ComboBox();
         private readonly Label findMessage = new Label(), emptyHint = new Label();
         private readonly Timer searchTimer = new Timer();
@@ -31,6 +33,9 @@ namespace ZeroXEdit
         private int active = -1, untitled, patternLength;
         private bool showInspector = true;
         private PatternSearch search;
+        private byte[] pendingReplacement;
+        private BinaryDocument.ReplaceAllOperation bulkReplace;
+        private enum SearchAction { FindNext, FindPrevious, ReplaceNext, ReplaceAll }
         private EditorTab Tab
         {
             get {
@@ -79,6 +84,8 @@ namespace ZeroXEdit
             {
                 SearchTick();
             };
+            Application.EnterThreadModal += PauseSearch;
+            Application.LeaveThreadModal += ResumeSearch;
             DragEnter += delegate(object sender, DragEventArgs e)
             {
                 if (e.Data.GetDataPresent(DataFormats.FileDrop))
@@ -146,9 +153,10 @@ namespace ZeroXEdit
             Item(edit, "all", "Select &all", "Ctrl+A", () => grid.SelectRange(0, Tab.Document.Length));
             Item(edit, "block", "Select &block…", "Ctrl+E", SelectBlock);
             Item(edit, "mode", "&Insert mode", "Ins", () => { grid.ToggleInsert(); grid.Focus(); });
-            Item(searchMenu, "find", "&Find…", "Ctrl+F", ShowFind);
-            Item(searchMenu, "next", "Find &next", "F3", () => Find(false));
-            Item(searchMenu, "prev", "Find &previous", "Shift+F3", () => Find(true));
+            Item(searchMenu, "find", "&Find…", "Ctrl+F", () => ShowFind(false));
+            Item(searchMenu, "replace", "&Replace…", "Ctrl+H", () => ShowFind(true));
+            Item(searchMenu, "next", "Find &next", "F3", () => RunSearch(SearchAction.FindNext));
+            Item(searchMenu, "prev", "Find &previous", "Shift+F3", () => RunSearch(SearchAction.FindPrevious));
             Sep(searchMenu);
             Item(searchMenu, "goto", "&Go to offset…", "Ctrl+G", GoTo);
             Item(view, "hash", "Calculate SHA-&256…", "",
@@ -341,14 +349,45 @@ namespace ZeroXEdit
             var next = new Button { Text = "Next", Bounds = Theme.Box(447, 7, 65, 29), AccessibleName = "Next match" };
             prev.Click += delegate
             {
-                Find(true);
+                RunSearch(SearchAction.FindPrevious);
             };
             next.Click += delegate
             {
-                Find(false);
+                RunSearch(SearchAction.FindNext);
             };
             findBar.Controls.AddRange(new Control[] { prev, next });
-            var close = ButtonAt(findBar, "close", "", 520, 6, 32, "Close search (Esc)", HideFind);
+            replaceMode.Text = "Replace";
+            replaceMode.AccessibleName = "Show replacement options";
+            replaceMode.Bounds = Theme.Box(522, 7, 85, 29);
+            findBar.Controls.Add(replaceMode);
+            var replaceRow = new Panel { Bounds = Theme.Box(0, 39, 560, 35), Visible = false };
+            var label = new Label { Text = "Replace with", Bounds = Theme.Box(16, 0, 90, 28),
+                                    TextAlign = ContentAlignment.MiddleLeft };
+            replacement.Bounds = Theme.Box(111, 2, 243, 28);
+            replacement.Font = query.Font;
+            replacement.AccessibleName = "Replacement value";
+            tips.SetToolTip(replacement, "Leave empty to delete the matching bytes.");
+            var one = new Button { Text = "Replace", Bounds = Theme.Box(364, 0, 77, 29) };
+            var all = new Button { Text = "Replace all", Bounds = Theme.Box(447, 0, 91, 29) };
+            one.Click += delegate { RunSearch(SearchAction.ReplaceNext); };
+            all.Click += delegate { RunSearch(SearchAction.ReplaceAll); };
+            replaceRow.Controls.AddRange(new Control[] { label, replacement, one, all });
+            findBar.Controls.Add(replaceRow);
+            replaceMode.CheckedChanged += delegate {
+                replaceRow.Visible = replaceMode.Checked;
+                findBar.Height = Theme.D(replaceMode.Checked ? 105 : 71);
+                findMessage.Top = Theme.D(replaceMode.Checked ? 74 : 40);
+                ResetFind();
+            };
+            replacement.TextChanged += delegate { ResetFind(); };
+            replacement.KeyDown += delegate(object sender, KeyEventArgs e) {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    RunSearch(SearchAction.ReplaceNext);
+                    e.SuppressKeyPress = true;
+                }
+            };
+            var close = ButtonAt(findBar, "close", "", 614, 6, 32, "Close search (Esc)", HideFind);
             findBar.Resize += delegate
             {
                 close.Left = findBar.Width - close.Width - Theme.D(8);
@@ -366,7 +405,7 @@ namespace ZeroXEdit
             {
                 if (e.KeyCode == Keys.Enter)
                 {
-                    Find(e.Shift);
+                    RunSearch(e.Shift ? SearchAction.FindPrevious : SearchAction.FindNext);
                     e.SuppressKeyPress = true;
                 }
             };
@@ -619,8 +658,9 @@ namespace ZeroXEdit
                 grid.Focus();
             }
         }
-        private void ShowFind()
+        private void ShowFind(bool withReplacement)
         {
+            replaceMode.Checked = withReplacement;
             findBar.Visible = true;
             ResetFind();
             query.Focus();
@@ -636,37 +676,79 @@ namespace ZeroXEdit
         {
             searchTimer.Stop();
             search = null;
+            bulkReplace = null;
+            pendingReplacement = null;
+        }
+        // A modal inspector, save dialog, or close prompt must see stable document bytes.
+        private void PauseSearch(object sender, EventArgs e) { searchTimer.Stop(); }
+        private void ResumeSearch(object sender, EventArgs e)
+        {
+            if (search != null || bulkReplace != null)
+                searchTimer.Start();
         }
         private void ResetFind()
         {
             StopSearch();
             findMessage.Text = findType.SelectedIndex == 0 ? "Enter a byte sequence, such as 89 50 4E 47."
                                                           : "Enter case-sensitive " + findType.Text + " text.";
+            if (replaceMode.Checked)
+                findMessage.Text += " An empty replacement deletes matches.";
         }
-        private void Find(bool backward)
+        private byte[] ParseSearchValue(string text, string field)
         {
-            if (query.Text.Length == 0)
+            var encoding = ((KeyValuePair<string, Encoding>)findType.SelectedItem).Value;
+            try { return encoding == null ? ByteTools.ParseHex(text) : encoding.GetBytes(text); }
+            catch (EncoderFallbackException ex)
             {
-                ShowFind();
-                return;
+                throw new FormatException("The " + field + " text contains a character that " + findType.Text +
+                                          " cannot encode.", ex);
             }
+            catch (FormatException ex)
+            {
+                throw new FormatException("Invalid " + field + " value. " + ex.Message, ex);
+            }
+        }
+        private void RunSearch(SearchAction action)
+        {
             StopSearch();
             findBar.Visible = true;
             try
             {
-                var encoding = ((KeyValuePair<string, Encoding>)findType.SelectedItem).Value;
-                byte[] pattern = encoding == null ? ByteTools.ParseHex(query.Text) : encoding.GetBytes(query.Text);
-                long start = Tab.Start + (Tab.Selected > 0 ? (backward ? -1 : 1) : 0);
-                search = new PatternSearch(Tab.Document, pattern, start, backward);
+                byte[] pattern = ParseSearchValue(query.Text, "search");
+                if (pattern.Length == 0)
+                {
+                    query.Focus();
+                    findMessage.Text = "Enter a search value.";
+                    return;
+                }
+                if (action == SearchAction.ReplaceNext || action == SearchAction.ReplaceAll)
+                {
+                    pendingReplacement = ParseSearchValue(replacement.Text, "replacement");
+                    if (pattern.SequenceEqual(pendingReplacement))
+                    {
+                        StopSearch();
+                        findMessage.Text = "Search and replacement are identical.";
+                        return;
+                    }
+                }
                 patternLength = pattern.Length;
-                findMessage.Text = "Searching…";
+                if (action == SearchAction.ReplaceAll)
+                {
+                    bulkReplace = new BinaryDocument.ReplaceAllOperation(Tab.Document, pattern, pendingReplacement);
+                    findMessage.Text = "Finding all matches…  Esc to cancel.";
+                }
+                else
+                {
+                    bool backward = action == SearchAction.FindPrevious;
+                    long start = Tab.Start;
+                    if (pendingReplacement == null && Tab.Selected > 0)
+                        start += backward ? -1 : 1;
+                    search = new PatternSearch(Tab.Document, pattern, start, backward);
+                    findMessage.Text = "Searching…";
+                }
                 SearchTick();
-                if (search != null)
+                if (search != null || bulkReplace != null)
                     searchTimer.Start();
-            }
-            catch (EncoderFallbackException)
-            {
-                findMessage.Text = "The search text contains a character that " + findType.Text + " cannot encode.";
             }
             catch (Exception ex)
             {
@@ -676,17 +758,40 @@ namespace ZeroXEdit
         }
         private void SearchTick()
         {
-            if (search == null)
-                return;
+            const int budget = 262144;
             try
             {
-                if (!search.Step(262144))
+                if (bulkReplace != null)
+                {
+                    var operation = bulkReplace;
+                    if (!operation.Step(budget))
+                        return;
+                    StopSearch();
+                    if (operation.Count == 0)
+                        findMessage.Text = "No matches in this file.";
+                    else
+                    {
+                        grid.FinishEdit(operation.FirstOffset + operation.ReplacementLength);
+                        findMessage.Text = "Replaced " + operation.Count.ToString("N0") +
+                                           (operation.Count == 1 ? " match." : " matches.");
+                    }
+                    return;
+                }
+                if (search == null || !search.Step(budget))
                     return;
                 long found = search.Result;
+                byte[] newBytes = pendingReplacement;
                 StopSearch();
                 if (found < 0)
                 {
                     findMessage.Text = "No matches in this file.";
+                    return;
+                }
+                if (newBytes != null)
+                {
+                    Tab.Document.Replace(found, patternLength, newBytes);
+                    grid.FinishEdit(found + newBytes.Length);
+                    findMessage.Text = "Replaced one match at 0x" + found.ToString("X") + ".";
                     return;
                 }
                 grid.SelectRange(found, found + patternLength);
@@ -759,7 +864,10 @@ namespace ZeroXEdit
                 CloseTab(active);
                 return true;
             case Keys.Control | Keys.F:
-                ShowFind();
+                ShowFind(false);
+                return true;
+            case Keys.Control | Keys.H:
+                ShowFind(true);
                 return true;
             case Keys.Control | Keys.G:
                 GoTo();
@@ -768,10 +876,10 @@ namespace ZeroXEdit
                 SelectBlock();
                 return true;
             case Keys.F3:
-                Find(false);
+                RunSearch(SearchAction.FindNext);
                 return true;
             case Keys.Shift | Keys.F3:
-                Find(true);
+                RunSearch(SearchAction.FindPrevious);
                 return true;
             case Keys.Control | Keys.Tab:
                 Cycle(1);
@@ -787,7 +895,7 @@ namespace ZeroXEdit
                 }
                 break;
             }
-            if (!query.Focused)
+            if (!query.Focused && !replacement.Focused)
                 switch (key)
                 {
                 case Keys.Control | Keys.Z:
@@ -816,6 +924,8 @@ namespace ZeroXEdit
         {
             if (disposing)
             {
+                Application.EnterThreadModal -= PauseSearch;
+                Application.LeaveThreadModal -= ResumeSearch;
                 searchTimer.Dispose();
                 tips.Dispose();
                 wordmark.Dispose();

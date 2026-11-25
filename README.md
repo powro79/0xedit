@@ -28,6 +28,7 @@ Launching without arguments starts with an empty workspace. Open a file with **C
 - Drag or use **Shift** with the arrow keys to select bytes. Typing or pasting over a selection replaces the whole selection. **Edit → Select block** accepts a start offset and length in hexadecimal or decimal.
 - Copy from the hex pane to get space-separated hex text, or from the ASCII pane to get text. Copies also carry the original bytes for lossless pasting between 0xEdit windows. Clipboard copies support up to 16 MiB. **File → Save selection as** streams larger selections directly to a file.
 - **Search → Find** (**Ctrl+F**) accepts hex bytes or case-sensitive text. Choose **ASCII**, **Windows-1252**, **UTF-8**, **UTF-16 LE**, **UTF-16 BE**, **UTF-32 LE**, or **UTF-32 BE** from the search format list. Searches match the exact encoded bytes at any offset, wrap in either direction, and include unsaved edits.
+- **Search → Replace** (**Ctrl+H**) uses the selected format for both fields. **Replace** changes the first match at or after the start of the selection or caret, wrapping if needed. **Replace all** changes every non-overlapping match in the active file in one undo step. A replacement can have a different byte length. Leave **Replace with** empty to delete matches. Press **Esc** to cancel a scan in progress.
 - The data inspector interprets bytes starting at the caret or the first selected byte. Switch the byte order to inspect integers and IEEE 754 floating-point values. The distribution chart groups the first 64 KiB into 32 buckets.
 - **View → Calculate SHA-256** hashes the current selection, or the whole document when the selection is empty. The result includes unsaved edits.
 
@@ -41,6 +42,7 @@ Launching without arguments starts with an empty workspace. Open a file with **C
 | Cut, copy, paste | Ctrl+X, Ctrl+C, Ctrl+V |
 | Select all, select block | Ctrl+A, Ctrl+E |
 | Find, next match, previous match | Ctrl+F, F3, Shift+F3 |
+| Replace | Ctrl+H |
 | Go to offset | Ctrl+G |
 | Beginning or end of file | Ctrl+Home, Ctrl+End |
 | Next or previous file | Ctrl+Tab, Ctrl+Shift+Tab |

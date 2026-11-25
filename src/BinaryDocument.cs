@@ -164,9 +164,8 @@ namespace ZeroXEdit
             return piece;
         }
 
-        private List<Piece> Range(long start, long count)
+        private void CopyPieces(long start, long count, List<Piece> range)
         {
-            var range = new List<Piece>();
             for (int i = Locate(start); count > 0; i++)
             {
                 var piece = pieces[i];
@@ -175,7 +174,6 @@ namespace ZeroXEdit
                 count -= take;
                 start += take;
             }
-            return range;
         }
 
         private void Splice(long offset, long remove, List<Piece> insert)
@@ -191,6 +189,12 @@ namespace ZeroXEdit
                 middle.Add(pieces[last].Slice(skip, pieces[last].Count - skip));
                 last++;
             }
+            // Grow storage before touching the old layout, especially for a fragmented bulk edit.
+            int capacity = checked(pieces.Count - (last - first) + middle.Count);
+            if (capacity > pieces.Capacity)
+                pieces.Capacity = Math.Max(capacity, (int)Math.Min(int.MaxValue, pieces.Capacity * 2L));
+            if (capacity > starts.Capacity)
+                starts.Capacity = pieces.Capacity;
             pieces.RemoveRange(first, last - first);
             pieces.InsertRange(first, middle);
             // Coalesce adjacent ranges, including both boundaries of the splice.
@@ -229,18 +233,112 @@ namespace ZeroXEdit
                 added.Add(Append(bytes));
             bool amend = finishHexByte && remove == 1 && bytes.Length == 1 && CanUndo && revision != savedRevision &&
                          undo.Peek().Offset == offset && undo.Peek().AddedCount == 1;
-            var edit = amend ? undo.Peek()
-                             : new Edit { Offset = offset, Removed = Range(offset, remove), RemovedCount = remove,
-                                          Before = revision };
+            ApplyEdit(offset, remove, added, bytes.Length, amend);
+            return true;
+        }
+
+        private void ApplyEdit(long offset, long remove, List<Piece> added, long addedCount, bool amend = false)
+        {
+            if (addedCount > long.MaxValue - (Length - remove))
+                throw new OverflowException("The result exceeds the maximum document length.");
+            var edit = amend ? undo.Peek() : new Edit {
+                Offset = offset, Removed = new List<Piece>(), RemovedCount = remove, Before = revision
+            };
+            if (!amend)
+                CopyPieces(offset, remove, edit.Removed);
             Splice(offset, remove, added);
             edit.Added = added;
-            edit.AddedCount = bytes.Length;
+            edit.AddedCount = addedCount;
             edit.After = ++serial;
             revision = edit.After;
             if (!amend)
                 undo.Push(edit);
             redo.Clear();
-            return true;
+        }
+
+        // Prepare a single splice against the original revision. Dropping an unfinished
+        // operation cancels it without changing the document or its undo history.
+        internal sealed class ReplaceAllOperation
+        {
+            private readonly BinaryDocument document;
+            private readonly long revision;
+            private readonly PatternSearch search;
+            private readonly int patternLength;
+            private readonly Piece single, block;
+            private readonly List<Piece> added = new List<Piece>();
+            private long lastEnd;
+            private int pendingBytes;
+            private bool complete;
+            internal long Count { get; private set; }
+            internal long FirstOffset { get; private set; }
+            internal int ReplacementLength { get; private set; }
+
+            internal ReplaceAllOperation(BinaryDocument document, byte[] pattern, byte[] replacement)
+            {
+                this.document = document;
+                revision = document.revision;
+                search = new PatternSearch(document, pattern, 0, false);
+                patternLength = pattern.Length;
+                ReplacementLength = replacement.Length;
+                if (ReplacementLength == 0)
+                    return;
+
+                // Adjacent matches share a repeated block, including when replacing every byte of a large file.
+                int copies = Math.Max(1, 65536 / ReplacementLength);
+                var buffer = new byte[copies * ReplacementLength];
+                Buffer.BlockCopy(replacement, 0, buffer, 0, ReplacementLength);
+                for (int filled = ReplacementLength; filled < buffer.Length;)
+                {
+                    int take = Math.Min(filled, buffer.Length - filled);
+                    Buffer.BlockCopy(buffer, 0, buffer, filled, take);
+                    filled += take;
+                }
+                block = new Piece(buffer, 0, buffer.Length);
+                single = block.Slice(0, ReplacementLength);
+            }
+
+            private void FlushRun()
+            {
+                if (pendingBytes > 0)
+                    added.Add(pendingBytes == ReplacementLength ? single : block.Slice(0, pendingBytes));
+                pendingBytes = 0;
+            }
+            private void Match(long offset)
+            {
+                if (Count == 0)
+                    FirstOffset = offset;
+                else if (offset > lastEnd)
+                {
+                    FlushRun();
+                    document.CopyPieces(lastEnd, offset - lastEnd, added);
+                }
+                Count++;
+                lastEnd = offset + patternLength;
+                pendingBytes += ReplacementLength;
+                if (block != null && pendingBytes == block.Count)
+                {
+                    added.Add(block);
+                    pendingBytes = 0;
+                }
+            }
+            internal bool Step(int budget)
+            {
+                if (complete)
+                    return true;
+                if (revision != document.revision)
+                    throw new InvalidOperationException("The document changed during Replace All.");
+                if (!search.Step(budget, Match))
+                    return false;
+                if (Count > 0)
+                {
+                    FlushRun();
+                    long span = lastEnd - FirstOffset;
+                    long newSpan = checked(span - Count * patternLength + Count * ReplacementLength);
+                    document.ApplyEdit(FirstOffset, span, added, newSpan);
+                }
+                complete = true;
+                return true;
+            }
         }
 
         internal long Undo()

@@ -291,7 +291,10 @@ namespace ZeroXEdit
         {
             if (forward ? !tab.Document.CanRedo : !tab.Document.CanUndo)
                 return;
-            long pos = forward ? tab.Document.Redo() : tab.Document.Undo();
+            FinishEdit(forward ? tab.Document.Redo() : tab.Document.Undo());
+        }
+        internal void FinishEdit(long pos)
+        {
             Edited(true);
             Navigate(pos, false);
         }

@@ -144,7 +144,8 @@ namespace ZeroXEdit
             cursor = backward && remaining > 0 ? high + pattern.Length - 1 : low;
             matched = 0;
         }
-        internal bool Step(int budget)
+        // With a visitor, continue past each full match and consume its bytes.
+        internal bool Step(int budget, Action<long> visitMatch = null)
         {
             while (budget > 0)
             {
@@ -168,7 +169,10 @@ namespace ZeroXEdit
                     if (matched == pattern.Length)
                     {
                         Result = backward ? cursor - i : cursor + i - pattern.Length + 1;
-                        return true;
+                        if (visitMatch == null)
+                            return true;
+                        visitMatch(Result);
+                        matched = 0;
                     }
                 }
                 cursor += backward ? -n : n;

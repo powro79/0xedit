@@ -47,6 +47,7 @@ namespace ZeroXEdit
                 Case("File-backed edits, saves, saved revisions, and failed writes", SaveAndReopen);
                 Case("64-bit offsets in a sparse file larger than 4 GiB", LargeFile);
                 Case("Forward, reverse, overlapping, chunk-boundary, and wrapped searches", Searches);
+                Case("Replace All across read boundaries, grouped undo, and interrupted scans", BulkReplacements);
                 Case("Hex parsing, offsets, and endian-sensitive data interpretation", Conversions);
                 Case("Native clipboard payload, alignment padding, and binary round trips", ClipboardPayload);
                 return 0;
@@ -246,6 +247,76 @@ namespace ZeroXEdit
                 Check(Search(doc, marker, doc.Length, true, 7) == 65534, "Crossed reverse budget");
             }
         }
+        private static void BulkReplacements()
+        {
+            var source = new byte[150000];
+            byte[] pattern = { 0xAB, 0xCD, 0xEF };
+            Array.Copy(pattern, 0, source, 65535, pattern.Length);
+            Array.Copy(pattern, 0, source, 149997, pattern.Length);
+            using (var doc = BinaryDocument.Create("test", source, false))
+            {
+                doc.Replace(65536, 1, new byte[] { 0xCC });
+                pattern[1] = 0xCC;
+                doc.Replace(149998, 1, new byte[] { 0xCC });
+                var before = doc.ReadBytes(0, source.Length);
+                var deletion = new BinaryDocument.ReplaceAllOperation(doc, pattern, new byte[0]);
+                Check(!deletion.Step(65536) && !deletion.Step(4) && deletion.Count == 1, "Staged boundary match");
+                Equal(before, doc);
+                while (!deletion.Step(16384)) { }
+                Check(deletion.Count == 2 && deletion.FirstOffset == 65535, "Both edited patterns found");
+                Equal(new byte[source.Length - 6], doc);
+                doc.Undo();
+                Equal(before, doc);
+                var miss = new BinaryDocument.ReplaceAllOperation(doc, new byte[] { 0x77 }, new byte[] { 1 });
+                Check(miss.Step(source.Length + 1) && miss.Count == 0 && doc.CanRedo, "No matches preserve redo");
+                doc.Redo();
+                Equal(new byte[source.Length - 6], doc);
+
+                var stale = new BinaryDocument.ReplaceAllOperation(doc, new byte[] { 0 }, new byte[] { 1 });
+                Check(!stale.Step(2048), "Scan still running");
+                doc.Replace(0, 1, new byte[] { 2 });
+                bool rejected = false;
+                try { stale.Step(2048); } catch (InvalidOperationException) { rejected = true; }
+                Check(rejected && doc.ReadBytes(0, 2).SequenceEqual(new byte[] { 2, 0 }), "Stale scan discarded");
+            }
+            using (var dense = BinaryDocument.Create("zeros", new byte[150001], false))
+            {
+                byte[] patternPair = { 0, 0 }, longer = { 0, 0, 0xA5 };
+                var growth = new BinaryDocument.ReplaceAllOperation(dense, patternPair, longer);
+                while (!growth.Step(32767)) { }
+                var expected = new byte[225001];
+                for (int i = 2; i < expected.Length; i += 3) expected[i] = 0xA5;
+                Equal(expected, dense);
+                Check(growth.Count == 75000 && dense.Dirty, "Non-overlapping matches in original input");
+                dense.Undo();
+                Check(!dense.Dirty && !dense.CanUndo, "One edit restores the saved revision");
+                Equal(new byte[150001], dense);
+                dense.Redo();
+                Equal(expected, dense);
+            }
+            string path = Path.GetTempFileName();
+            try
+            {
+                byte[] original = Encoding.ASCII.GetBytes("before foo / foo after");
+                File.WriteAllBytes(path, original);
+                using (var document = BinaryDocument.Open(path))
+                {
+                    var operation = new BinaryDocument.ReplaceAllOperation(document, Encoding.ASCII.GetBytes("foo"),
+                                                                           Encoding.ASCII.GetBytes("bar!"));
+                    while (!operation.Step(3)) { }
+                    Check(File.ReadAllBytes(path).SequenceEqual(original), "Replacement remains in memory until save");
+                    document.Save(path);
+                    Check(File.ReadAllText(path) == "before bar! / bar! after", "Saved replaced file");
+                    document.Undo();
+                    Equal(original, document);
+                    Check(document.Dirty, "Undo across a save marks the document modified");
+                    document.Redo();
+                    Check(!document.Dirty, "Redo restores the saved revision");
+                }
+            }
+            finally { File.Delete(path); }
+        }
+
         private static void Conversions()
         {
             byte[] bytes = ByteTools.ParseHex("fF 00\r\n7a");
@@ -364,6 +435,12 @@ namespace ZeroXEdit
                 Check(tab.Start == bytes.Length + 2 && tab.Selected == bytes.Length, sample.Name + " reverse wrap");
                 Key(form, Keys.F3);
                 Check(tab.Start == 1 && tab.Selected == bytes.Length, sample.Name + " forward wrap");
+                Key(form, Keys.Control | Keys.H);
+                var replacement = Field<TextBox>(form, "replacement");
+                replacement.Text = sample.Text + sample.Text;
+                replacement.Parent.Controls.OfType<Button>().Single(b => b.Text == "Replace all").PerformClick();
+                string doubled = sample.Bytes + " " + sample.Bytes;
+                Equal(ByteTools.ParseHex("FF " + doubled + " FF " + doubled), tab.Document);
             }
 
             grid.SelectRange(0, tab.Document.Length);
@@ -488,7 +565,94 @@ namespace ZeroXEdit
                 Check(!Field<Inspector>(form, "inspector").Visible && grid.Width > 0, "Compact layout");
                 Case("All seven search encodings, byte order, wraparound, and unrepresentable text",
                      () => EncodedTextSearches(form));
+                Case("Replace controls, selection, encodings, deletion, validation, and cancellation",
+                     () => ReplaceFromBar(form));
             }
+        }
+        private static void ReplaceFromBar(MainForm form)
+        {
+            Key(form, Keys.Control | Keys.N);
+            var tab = Field<List<EditorTab>>(form, "tabs").Last();
+            var grid = Field<HexView>(form, "grid");
+            grid.Put(ByteTools.ParseHex("80 3F 80"));
+            grid.Navigate(2, false);
+            Key(form, Keys.Control | Keys.H);
+            var query = Field<TextBox>(form, "query");
+            var replacement = Field<TextBox>(form, "replacement");
+            var format = Field<ComboBox>(form, "findType");
+            var message = Field<Label>(form, "findMessage");
+            var buttons = replacement.Parent.Controls.OfType<Button>();
+            var one = buttons.Single(b => b.Text == "Replace");
+            var all = buttons.Single(b => b.Text == "Replace all");
+            Check(replacement.Visible && one.Visible && all.Visible, "Ctrl+H opens replace controls");
+
+            format.SelectedIndex = format.FindStringExact("Windows-1252");
+            query.Text = "€";
+            replacement.Text = "éé";
+            Key(form, Keys.F3);
+            Check(tab.Start == 2 && tab.Selected == 1, "Selected match before Replace");
+            one.PerformClick();
+            Equal(ByteTools.ParseHex("80 3F E9 E9"), tab.Document);
+            Check(tab.Caret == 4 && tab.Selected == 0, "Caret follows replacement");
+            one.PerformClick();
+            Equal(ByteTools.ParseHex("E9 E9 3F E9 E9"), tab.Document);
+            grid.Focus();
+            Key(form, Keys.Control | Keys.Z);
+            Equal(ByteTools.ParseHex("80 3F E9 E9"), tab.Document);
+            replacement.Text = "\U0001F600";
+            all.PerformClick();
+            Check(message.Text.Contains("replacement") && message.Text.Contains("cannot encode") && tab.Document.CanRedo,
+                  "Invalid encoded replacement preserves history");
+
+            format.SelectedIndex = format.FindStringExact("Hex bytes");
+            query.Text = "E9";
+            replacement.Text = "F";
+            all.PerformClick();
+            Check(message.Text.Contains("Invalid replacement") && tab.Document.CanRedo, "Invalid hex replacement");
+            replacement.Text = "e9";
+            all.PerformClick();
+            Check(tab.Document.CanRedo && message.Text.Contains("identical"), "Identical bytes preserve history");
+            replacement.Clear();
+            all.PerformClick();
+            Equal(ByteTools.ParseHex("80 3F"), tab.Document);
+            Check(message.Text.Contains("2 matches"), "Replacement count");
+            Key(form, Keys.Control | Keys.Z);
+            Equal(ByteTools.ParseHex("80 3F E9 E9"), tab.Document);
+            query.Clear();
+            all.PerformClick();
+            Check(tab.Document.CanRedo && message.Text == "Enter a search value.", "Empty search preserves history");
+
+            grid.SelectRange(0, tab.Document.Length);
+            grid.Put(new byte[300000]);
+            query.Text = "00"; replacement.Text = "FF";
+            all.PerformClick();
+            Check(message.Text.Contains("Esc"), "Long scan pending");
+            var timer = Field<Timer>(form, "searchTimer");
+            using (var modal = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = form.Location })
+            {
+                bool paused = false;
+                modal.Shown += delegate { paused = !timer.Enabled; modal.Close(); };
+                modal.ShowDialog(form);
+                Check(paused && timer.Enabled, "Pending replacement pauses while a modal dialog is open");
+            }
+            Key(form, Keys.Escape);
+            Invoke(form, "SearchTick");
+            Equal(new byte[300000], tab.Document);
+            Check(!replacement.Visible, "Escape cancels the scan");
+
+            Key(form, Keys.Control | Keys.H);
+            all.PerformClick();
+            var timeout = System.Diagnostics.Stopwatch.StartNew();
+            while (timer.Enabled && timeout.ElapsedMilliseconds < 3000)
+            {
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(5);
+            }
+            Check(!timer.Enabled && tab.Document.ReadBytes(0, 300000).All(b => b == 0xFF),
+                  "Replace All finishes on a later timer tick");
+            grid.Focus();
+            Key(form, Keys.Control | Keys.Z);
+            Equal(new byte[300000], tab.Document);
         }
     }
 }
