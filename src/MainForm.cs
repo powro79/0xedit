@@ -134,6 +134,7 @@ namespace ZeroXEdit
             var help = AddMenu("&Help");
             Item(file, "new", "&New", "Ctrl+N", NewFile);
             Item(file, "open", "&Open…", "Ctrl+O", OpenDialog);
+            Item(file, "compare", "Co&mpare files…", "Ctrl+Shift+C", CompareFiles);
             Item(file, "example", "Open &example", "", OpenExample);
             Sep(file);
             Item(file, "save", "&Save", "Ctrl+S", () => Save(Tab, false));
@@ -487,6 +488,10 @@ namespace ZeroXEdit
                 Title = "Open binary file", Filter = "All files (*.*)|*.*", Multiselect = true, RestoreDirectory = true
             }) if (dialog.ShowDialog(this) == DialogResult.OK) OpenPaths(dialog.FileNames);
         }
+        private void CompareFiles()
+        {
+            using (var dialog = new CompareDialog(tabs, active)) dialog.ShowDialog(this);
+        }
         private int FindPath(string path)
         {
             return tabs.FindIndex(t => string.Equals(t.Document.FilePath, path, StringComparison.OrdinalIgnoreCase));
@@ -634,7 +639,7 @@ namespace ZeroXEdit
             LayoutInspector();
             foreach (var entry in commands)
                 entry.Value.Enabled = hasDocument || entry.Key == "new" || entry.Key == "open" ||
-                                      entry.Key == "example" || entry.Key == "exit" || entry.Key == "about";
+                                      entry.Key == "compare" || entry.Key == "example" || entry.Key == "exit" || entry.Key == "about";
         }
         private void GoTo()
         {
@@ -848,6 +853,9 @@ namespace ZeroXEdit
                 return true;
             case Keys.Control | Keys.O:
                 OpenDialog();
+                return true;
+            case Keys.Control | Keys.Shift | Keys.C:
+                CompareFiles();
                 return true;
             }
             if (Tab == null)

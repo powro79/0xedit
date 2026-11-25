@@ -46,6 +46,7 @@ namespace ZeroXEdit
                 Case("Randomized edit, undo, redo, and branching history", RandomEdits);
                 Case("File-backed edits, saves, saved revisions, and failed writes", SaveAndReopen);
                 Case("64-bit offsets in a sparse file larger than 4 GiB", LargeFile);
+                Case("Byte comparisons, differing ranges, block boundaries, and unequal lengths", Comparisons);
                 Case("Forward, reverse, overlapping, chunk-boundary, and wrapped searches", Searches);
                 Case("Replace All across read boundaries, grouped undo, and interrupted scans", BulkReplacements);
                 Case("Hex parsing, offsets, and endian-sensitive data interpretation", Conversions);
@@ -201,6 +202,13 @@ namespace ZeroXEdit
                     Equal(new byte[] { 0, 0, 0, 222, 173 }, doc);
                     doc.Undo();
                     Check(doc.Length == at + 2, "Large deletion could not be undone");
+                    using (var empty = BinaryDocument.Create("empty", new byte[0], false))
+                    {
+                        var comparison = new FileComparison(empty, doc);
+                        comparison.ScanBlock();
+                        Check(comparison.Complete && comparison.DifferentBytes == at + 2 && comparison.Ranges == 1 &&
+                              comparison.RangeStart(0) == 0, "64-bit comparison tail");
+                    }
                 }
             }
             finally
@@ -245,6 +253,47 @@ namespace ZeroXEdit
             {
                 Check(Search(doc, marker, 0, false, 90000) == 65534, "Crossed buffer boundary");
                 Check(Search(doc, marker, doc.Length, true, 7) == 65534, "Crossed reverse budget");
+            }
+        }
+        private static void CheckComparison(byte[] a, byte[] b, long count, params long[] starts)
+        {
+            using (var left = BinaryDocument.Create("left", a, false))
+            using (var right = BinaryDocument.Create("right", b, false))
+            {
+                var diff = new FileComparison(left, right);
+                while (!diff.Complete)
+                {
+                    diff.ScanBlock();
+                    if (diff.Ranges > 0)
+                        Check(diff.RangeStart(diff.Ranges - 1) == starts[diff.Ranges - 1], "Navigation while scanning");
+                }
+                Check(diff.Scanned == Math.Max(a.Length, b.Length) && diff.DifferentBytes == count &&
+                      diff.Ranges == starts.Length, "Comparison totals");
+                for (int i = starts.Length - 1; i >= 0; i--)
+                    Check(diff.RangeStart(i) == starts[i], "Difference offset " + i);
+            }
+        }
+        private static void Comparisons()
+        {
+            CheckComparison(new byte[0], new byte[0], 0);
+            CheckComparison(new byte[] { 1, 2 }, new byte[] { 1, 2 }, 0);
+            CheckComparison(new byte[] { 1, 2, 3 }, new byte[] { 1 }, 2, 1);
+            CheckComparison(new byte[] { 1 }, new byte[] { 2, 3 }, 2, 0);
+            CheckComparison(new byte[] { 1, 2, 3 }, new byte[] { 1, 4, 2, 3 }, 3, 1);
+            var a = new byte[131075];
+            var b = new byte[a.Length + 2];
+            foreach (int i in new[] { 0, 17, 65535, 65536, 65537, 65540, 131072 }) b[i] = 1;
+            CheckComparison(a, b, 9, 0, 17, 65535, 65540, 131072, a.Length);
+            CheckComparison(b, a, 9, 0, 17, 65535, 65540, 131072, a.Length);
+            for (int i = 0; i < a.Length; i++) a[i] = (byte)(i % 2);
+            using (var left = BinaryDocument.Create("dense", a, false))
+            using (var right = BinaryDocument.Create("zeros", new byte[a.Length], false))
+            {
+                var diff = new FileComparison(left, right);
+                while (!diff.Complete) diff.ScanBlock();
+                Check(diff.Ranges == a.Length / 2 && diff.DifferentBytes == diff.Ranges, "Alternating differences");
+                foreach (long index in new[] { 0L, 1L, 32767L, 32768L, diff.Ranges - 1 })
+                    Check(diff.RangeStart(index) == 2 * index + 1, "Dense difference navigation");
             }
         }
         private static void BulkReplacements()
@@ -474,7 +523,7 @@ namespace ZeroXEdit
                 var commands = Field<Dictionary<string, ToolStripMenuItem>>(form, "commands");
                 var toolbar = Field<Panel>(form, "toolbar").Controls.OfType<ActionButton>().ToArray();
                 Check(tabs.Count == 0 && form.Text == "0xEdit" && !grid.Visible, "Empty startup workspace");
-                Check(commands["open"].Enabled && !commands["save"].Enabled && !commands["find"].Enabled &&
+                Check(commands["open"].Enabled && commands["compare"].Enabled && !commands["save"].Enabled && !commands["find"].Enabled &&
                       toolbar.Where(button => button.Enabled).Select(button => button.GlyphName)
                              .OrderBy(name => name).SequenceEqual(new[] { "new", "open" }), "Empty workspace commands");
                 Key(form, Keys.Control | Keys.N);
@@ -567,7 +616,98 @@ namespace ZeroXEdit
                      () => EncodedTextSearches(form));
                 Case("Replace controls, selection, encodings, deletion, validation, and cancellation",
                      () => ReplaceFromBar(form));
+                Case("Compare dialog, pink highlights in both panes, navigation, and file lifetime",
+                     () => CompareFromEditor(form));
             }
+        }
+        private static int PinkBands(ComparisonGrid view)
+        {
+            using (var image = new Bitmap(view.Width, view.Height))
+            {
+                view.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
+                int runs = 0;
+                bool pink = false;
+                for (int x = 0; x < image.Width; x++)
+                {
+                    bool next = image.GetPixel(x, Theme.D(33) + 2).ToArgb() == ComparisonGrid.Pink.ToArgb();
+                    if (next && !pink) runs++;
+                    pink = next;
+                }
+                return runs;
+            }
+        }
+        private static void CompareFromEditor(MainForm form)
+        {
+            byte[] bytes = Enumerable.Range(0, 3072).Select(i => (byte)i).ToArray();
+            string path = Path.GetTempFileName();
+            try
+            {
+                File.WriteAllBytes(path, bytes);
+                using (var empty = new CompareDialog(new List<EditorTab>(), -1))
+                {
+                    empty.StartPosition = FormStartPosition.Manual;
+                    empty.Location = form.Location;
+                    empty.Show(form);
+                    var left = Field<ComboBox>(empty, "left");
+                    var right = Field<ComboBox>(empty, "right");
+                    Invoke(empty, "OpenPath", left, path);
+                    Check(right.SelectedIndex == -1 && Field<FileComparison>(empty, "comparison") == null,
+                          "A single input waits for the other file");
+                    Invoke(empty, "OpenPath", right, path);
+                    Check(Field<Label>(empty, "summary").Text.Contains("identical"), "Browse from an empty workspace");
+                }
+                var doc = BinaryDocument.Create("edited.bin", bytes, false);
+                Invoke(form, "Add", doc);
+                var editor = Field<HexView>(form, "grid");
+                editor.SelectRange(1, 3);
+                editor.Put(new byte[] { 0x58, 0x59 });
+                editor.SelectRange(66, 67);
+                editor.Put(new byte[] { 0xAA });
+                editor.SelectRange(3071, 3072);
+                editor.Delete(false);
+                long originalCaret = Field<List<EditorTab>>(form, "tabs").Last().Caret;
+
+                Exception failure = null;
+                bool opened = false;
+                form.BeginInvoke((MethodInvoker)delegate {
+                    var dialog = Application.OpenForms.OfType<CompareDialog>().Single();
+                    opened = true;
+                    try
+                    {
+                        dialog.Location = form.Location;
+                        var right = Field<ComboBox>(dialog, "right");
+                        Invoke(dialog, "OpenPath", right, path);
+                        Invoke(dialog, "Scan");
+                        var diff = Field<FileComparison>(dialog, "comparison");
+                        var view = Field<ComparisonGrid>(dialog, "grid");
+                        Check(diff.Left == doc && diff.Complete && diff.DifferentBytes == 4 && diff.Ranges == 3,
+                              "Compared unsaved edits to a disk file");
+                        Check(view.HighlightOffset == 1 && PinkBands(view) == 4, "Pink marks hex and ASCII on both sides");
+                        Field<Button>(dialog, "next").PerformClick();
+                        Check(view.HighlightOffset == 66, "Next difference button");
+                        Invoke(dialog, "ProcessCmdKey", new Message(), Keys.F7);
+                        Check(view.HighlightOffset == 3071 && Field<Label>(dialog, "detail").Text.Contains("--"),
+                              "Navigate to a byte present on only one side");
+                        Invoke(dialog, "ProcessCmdKey", new Message(), Keys.F7);
+                        Check(view.HighlightOffset == 1, "Forward wrap");
+                        Invoke(dialog, "ProcessCmdKey", new Message(), Keys.Shift | Keys.F7);
+                        Check(view.HighlightOffset == 3071, "Backward wrap");
+                        right.SelectedIndex = Field<ComboBox>(dialog, "left").SelectedIndex;
+                        Check(Field<Label>(dialog, "summary").Text.Contains("identical") && PinkBands(view) == 0,
+                              "Changing the input clears the previous highlights");
+                    }
+                    catch (Exception ex) { failure = ex; }
+                    finally { dialog.Close(); }
+                });
+                Key(form, Keys.Control | Keys.Shift | Keys.C);
+                Check(opened, "Comparison shortcut opens the dialog");
+                if (failure != null) throw new Exception("Comparison dialog", failure);
+                Check(doc.Dirty && Field<List<EditorTab>>(form, "tabs").Last().Caret == originalCaret &&
+                      doc.ReadBytes(1, 2).SequenceEqual(new byte[] { 0x58, 0x59 }), "Editor state preserved");
+                using (var reopened = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+                    Check(reopened.Length == bytes.Length, "Comparison file handle released");
+            }
+            finally { File.Delete(path); }
         }
         private static void ReplaceFromBar(MainForm form)
         {

@@ -32,6 +32,14 @@ Launching without arguments starts with an empty workspace. Open a file with **C
 - The data inspector interprets bytes starting at the caret or the first selected byte. Switch the byte order to inspect integers and IEEE 754 floating-point values. The distribution chart groups the first 64 KiB into 32 buckets.
 - **View → Calculate SHA-256** hashes the current selection, or the whole document when the selection is empty. The result includes unsaved edits.
 
+## Compare files
+
+Choose **File → Compare files** (**Ctrl+Shift+C**). Select an open tab on each side or use **Browse** to choose a file from disk. Open tabs include unsaved edits, so you can compare an edited tab with its saved file.
+
+The read-only view shows both files at the same offsets. Pink cells mark differences in both hex and ASCII. A `--` on the shorter side marks a missing byte. An insertion shifts the subsequent offset comparisons. Use **F7** and **Shift+F7** to jump between contiguous ranges of differences.
+
+![Two versions of a PNG with differing bytes highlighted in pink in both the hex and ASCII columns](docs/comparison.png)
+
 ## Keyboard shortcuts
 
 | Action | Shortcut |
@@ -43,6 +51,8 @@ Launching without arguments starts with an empty workspace. Open a file with **C
 | Select all, select block | Ctrl+A, Ctrl+E |
 | Find, next match, previous match | Ctrl+F, F3, Shift+F3 |
 | Replace | Ctrl+H |
+| Compare files | Ctrl+Shift+C |
+| Next or previous difference (comparison window) | F7, Shift+F7 |
 | Go to offset | Ctrl+G |
 | Beginning or end of file | Ctrl+Home, Ctrl+End |
 | Next or previous file | Ctrl+Tab, Ctrl+Shift+Tab |
