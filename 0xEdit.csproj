@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)'==''">Debug</Configuration>
+    <Platform Condition="'$(Platform)'==''">AnyCPU</Platform>
+    <ProjectGuid>{A3D821F6-4D57-40BF-8CF8-C4C1DF3CDD17}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>ZeroXEdit</RootNamespace>
+    <AssemblyName>0xEdit</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\0xEdit.ico</ApplicationIcon>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <Prefer32Bit>false</Prefer32Bit>
+    <Optimize Condition="'$(Configuration)'=='Release'">true</Optimize>
+    <DebugSymbols Condition="'$(Configuration)'=='Debug'">true</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System"/><Reference Include="System.Core"/>
+    <Reference Include="System.Drawing"/><Reference Include="System.Windows.Forms"/>
+    <Compile Include="src\*.cs"/>
+    <EmbeddedResource Include="assets\aurora.png"><LogicalName>ZeroXEdit.aurora.png</LogicalName></EmbeddedResource>
+    <EmbeddedResource Include="LICENSE"><LogicalName>ZeroXEdit.LICENSE</LogicalName></EmbeddedResource>
+    <None Include="app.manifest"/><None Include="assets\0xEdit.ico"/>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets"/>
+</Project>
