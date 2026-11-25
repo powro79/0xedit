@@ -15,7 +15,7 @@ From a Windows PowerShell or PowerShell terminal in the project directory, run
 
 The script uses the C# compiler included with .NET Framework. You can also open `0xEdit.csproj` in Visual Studio with the .NET Framework 4.8 targeting pack installed.
 
-Launching without arguments opens an editable copy of the included PNG example. Its first save asks for a destination. Open your own files with **Open file**, drag them into the window, or pass one or more paths on the command line.
+Launching without arguments starts with an empty workspace. Open a file with **Ctrl+O**, drag files into the window, or pass one or more paths on the command line. To explore the bundled PNG, choose **File → Open example**.
 
 ```powershell
 .\bin\Release\0xEdit.exe .\assets\aurora.png .\assets\0xEdit.ico

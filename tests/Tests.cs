@@ -330,6 +330,10 @@ namespace ZeroXEdit
         }
         private static void Desktop(string[] args)
         {
+            string path = Assembly.GetExecutingAssembly().Location;
+            using (var fromPath = new MainForm(new[] { path }))
+                Check(Field<List<EditorTab>>(fromPath, "tabs").Single().Document.FilePath == path, "Startup file path");
+
             using (var form = new MainForm(new string[0]))
             {
                 form.ShowInTaskbar = false;
@@ -340,10 +344,21 @@ namespace ZeroXEdit
                 Application.DoEvents();
                 var grid = Field<HexView>(form, "grid");
                 var tabs = Field<List<EditorTab>>(form, "tabs");
+                var commands = Field<Dictionary<string, ToolStripMenuItem>>(form, "commands");
+                var toolbar = Field<Panel>(form, "toolbar").Controls.OfType<ActionButton>().ToArray();
+                Check(tabs.Count == 0 && form.Text == "0xEdit" && !grid.Visible, "Empty startup workspace");
+                Check(commands["open"].Enabled && !commands["save"].Enabled && !commands["find"].Enabled &&
+                      toolbar.Where(button => button.Enabled).Select(button => button.GlyphName)
+                             .OrderBy(name => name).SequenceEqual(new[] { "new", "open" }), "Empty workspace commands");
+                Key(form, Keys.Control | Keys.N);
+                Check(tabs.Count == 1 && tabs[0].Document.Length == 0 && grid.Visible && commands["save"].Enabled,
+                      "New file from empty workspace");
+                commands["example"].PerformClick();
+                Invoke(form, "CloseTab", 0);
                 var tab = tabs[0];
                 Check(tab.Document.IsExample &&
                           tab.Document.ReadBytes(0, 4).SequenceEqual(new byte[] { 137, 80, 78, 71 }),
-                      "Startup example");
+                      "Explicitly opened example");
                 if (args.Length > 1)
                 {
                     using (var shot = new Bitmap(form.ClientSize.Width, form.ClientSize.Height))

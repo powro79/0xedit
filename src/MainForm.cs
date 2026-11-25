@@ -24,10 +24,10 @@ namespace ZeroXEdit
                               monoStatus = Theme.Mono(9);
         private readonly TextBox query = new TextBox();
         private readonly ComboBox findType = new ComboBox(), columns = new ComboBox();
-        private readonly Label findMessage = new Label();
+        private readonly Label findMessage = new Label(), emptyHint = new Label();
         private readonly Timer searchTimer = new Timer();
         private readonly Dictionary<string, ToolStripMenuItem> commands = new Dictionary<string, ToolStripMenuItem>();
-        private ActionButton undoButton, redoButton, modeButton, inspectorButton;
+        private ActionButton modeButton, inspectorButton;
         private int active = -1, untitled, patternLength;
         private bool showInspector = true;
         private PatternSearch search;
@@ -88,19 +88,13 @@ namespace ZeroXEdit
             {
                 OpenPaths((string[])e.Data.GetData(DataFormats.FileDrop));
             };
-            if (paths.Length > 0)
-                OpenPaths(paths);
-            if (Tab == null)
-            {
-                if (paths.Length == 0)
-                    OpenExample();
-                else
-                    NewFile();
-            }
+            UpdateDocumentAvailability();
+            OpenPaths(paths);
             Shown += delegate
             {
                 LayoutInspector();
-                grid.Focus();
+                if (Tab != null)
+                    grid.Focus();
             };
         }
         private void BuildMenus()
@@ -151,7 +145,7 @@ namespace ZeroXEdit
             Sep(edit);
             Item(edit, "all", "Select &all", "Ctrl+A", () => grid.SelectRange(0, Tab.Document.Length));
             Item(edit, "block", "Select &block…", "Ctrl+E", SelectBlock);
-            Item(edit, "mode", "&Insert mode", "Ins", grid.ToggleInsert);
+            Item(edit, "mode", "&Insert mode", "Ins", () => { grid.ToggleInsert(); grid.Focus(); });
             Item(searchMenu, "find", "&Find…", "Ctrl+F", ShowFind);
             Item(searchMenu, "next", "Find &next", "F3", () => Find(false));
             Item(searchMenu, "prev", "Find &previous", "Shift+F3", () => Find(true));
@@ -203,20 +197,15 @@ namespace ZeroXEdit
         {
             toolbar.Height = Theme.D(53);
             toolbar.BackColor = Theme.Paper;
-            ButtonAt(toolbar, "open", "Open file", 15, 10, 99, "Open file (Ctrl+O)", OpenDialog, true);
-            ButtonAt(toolbar, "new", "New", 124, 10, 69, "New file (Ctrl+N)", NewFile);
-            ButtonAt(toolbar, "save", "Save", 196, 10, 71, "Save file (Ctrl+S)", () => Save(Tab, false));
-            undoButton = ButtonAt(toolbar, "undo", "", 285, 10, 35, "Undo (Ctrl+Z)", () => grid.History(false));
-            redoButton = ButtonAt(toolbar, "redo", "", 322, 10, 35, "Redo (Ctrl+Y)", () => grid.History(true));
-            ButtonAt(toolbar, "find", "Find", 375, 10, 67, "Find bytes or text (Ctrl+F)", ShowFind);
-            ButtonAt(toolbar, "goto", "Go to", 446, 10, 75, "Go to offset (Ctrl+G)", GoTo);
-            modeButton = ButtonAt(toolbar, "edit", "Overwrite", 530, 10, 110, "Switch insert / overwrite (Insert)",
-                                  () =>
-                                  {
-                                      grid.ToggleInsert();
-                                      grid.Focus();
-                                  });
-            inspectorButton = ButtonAt(toolbar, "panel", "", 650, 10, 35, "Toggle data inspector", ToggleInspector);
+            ToolbarCommand("open", "Open file", 15, 99, "Open file (Ctrl+O)", primary: true);
+            ToolbarCommand("new", "New", 124, 69, "New file (Ctrl+N)");
+            ToolbarCommand("save", "Save", 196, 71, "Save file (Ctrl+S)");
+            ToolbarCommand("undo", "", 285, 35, "Undo (Ctrl+Z)");
+            ToolbarCommand("redo", "", 322, 35, "Redo (Ctrl+Y)");
+            ToolbarCommand("find", "Find", 375, 67, "Find bytes or text (Ctrl+F)");
+            ToolbarCommand("goto", "Go to", 446, 75, "Go to offset (Ctrl+G)");
+            modeButton = ToolbarCommand("mode", "Overwrite", 530, 110, "Switch insert / overwrite (Insert)", "edit");
+            inspectorButton = ToolbarCommand("inspector", "", 650, 35, "Toggle data inspector", "panel");
             toolbar.Resize += delegate
             {
                 inspectorButton.Left = toolbar.Width - Theme.D(49);
@@ -229,6 +218,14 @@ namespace ZeroXEdit
                     Theme.Rule(e.Graphics, Theme.Line, Theme.D(x), Theme.D(18), Theme.D(x), Theme.D(35));
                 Theme.Rule(e.Graphics, Theme.Line, 0, toolbar.Height - 1, toolbar.Width, toolbar.Height - 1);
             };
+        }
+        private ActionButton ToolbarCommand(string id, string label, int x, int width, string tip,
+                                           string icon = null, bool primary = false)
+        {
+            var command = commands[id];
+            var button = ButtonAt(toolbar, icon ?? id, label, x, 10, width, tip, command.PerformClick, primary);
+            command.EnabledChanged += delegate { button.Enabled = command.Enabled; };
+            return button;
         }
         private void BuildWorkspace()
         {
@@ -268,6 +265,11 @@ namespace ZeroXEdit
             editor.Controls.Add(viewHeader);
             workspace.Controls.Add(editor);
             workspace.Controls.Add(inspector);
+            emptyHint.Text = "Open a file (Ctrl+O), or drop one here.";
+            emptyHint.Dock = DockStyle.Fill;
+            emptyHint.TextAlign = ContentAlignment.MiddleCenter;
+            emptyHint.ForeColor = Theme.Muted;
+            workspace.Controls.Add(emptyHint);
             workspace.Resize += delegate
             {
                 LayoutInspector();
@@ -285,7 +287,7 @@ namespace ZeroXEdit
         }
         private void LayoutInspector()
         {
-            inspector.Visible = showInspector && workspace.Width >= Theme.D(1090);
+            inspector.Visible = Tab != null && showInspector && workspace.Width >= Theme.D(1090);
             if (commands.ContainsKey("inspector"))
                 commands["inspector"].Checked = inspector.Visible;
         }
@@ -412,6 +414,8 @@ namespace ZeroXEdit
                 return;
             StopSearch();
             active = index;
+            if (tabs.Count == 1)
+                UpdateDocumentAvailability();
             grid.Bind(Tab);
             inspector.RefreshDocument(Tab);
             columns.SelectedIndex = Tab.Columns == 8 ? 0 : Tab.Columns == 16 ? 1 : 2;
@@ -560,14 +564,24 @@ namespace ZeroXEdit
             strip.RefreshTabs(active);
             inspector.RefreshValues();
             status.Invalidate();
-            undoButton.Enabled = commands["undo"].Enabled = doc.CanUndo;
-            redoButton.Enabled = commands["redo"].Enabled = doc.CanRedo;
+            commands["undo"].Enabled = doc.CanUndo;
+            commands["redo"].Enabled = doc.CanRedo;
             commands["cut"].Enabled = commands["copy"].Enabled = Tab.Selected > 0;
             commands["export"].Enabled = Tab.Selected > 0;
             commands["block"].Enabled = doc.Length > 0;
             commands["delete"].Enabled = Tab.Selected > 0 || Tab.Caret < doc.Length;
             commands["mode"].Checked = Tab.Insert;
             modeButton.Text = Tab.Insert ? "Insert" : "Overwrite";
+        }
+        private void UpdateDocumentAvailability()
+        {
+            bool hasDocument = Tab != null;
+            emptyHint.Visible = !hasDocument;
+            editor.Visible = hasDocument;
+            LayoutInspector();
+            foreach (var entry in commands)
+                entry.Value.Enabled = hasDocument || entry.Key == "new" || entry.Key == "open" ||
+                                      entry.Key == "example" || entry.Key == "exit" || entry.Key == "about";
         }
         private void GoTo()
         {
@@ -704,8 +718,6 @@ namespace ZeroXEdit
         }
         protected override bool ProcessCmdKey(ref Message msg, Keys key)
         {
-            if (Tab == null)
-                return base.ProcessCmdKey(ref msg, key);
             switch (key)
             {
             case Keys.Control | Keys.N:
@@ -714,6 +726,11 @@ namespace ZeroXEdit
             case Keys.Control | Keys.O:
                 OpenDialog();
                 return true;
+            }
+            if (Tab == null)
+                return base.ProcessCmdKey(ref msg, key);
+            switch (key)
+            {
             case Keys.Control | Keys.S:
                 Save(Tab, false);
                 return true;
